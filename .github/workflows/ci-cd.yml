@@ -1,0 +1,95 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]   # PR opened/updated -> tests only
+  push:
+    branches: [main]   # merged to main -> test, build, push, deploy
+
+permissions:
+  id-token: write      # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: eks-notes
+  NAMESPACE: notes
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - run: npm test
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - run: npm run build   # fails the pipeline if the React code doesn't compile
+
+  deploy:
+    needs: [test-backend, build-frontend]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to AWS with OIDC (no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push both images (tagged with the commit SHA)
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          for svc in backend frontend; do
+            IMAGE="$REGISTRY/$CLUSTER_NAME-$svc:$TAG"
+            docker build --build-arg APP_VERSION="${TAG::7}" -t "$IMAGE" "$svc"
+            docker push "$IMAGE"
+          done
+          echo "BACKEND_IMAGE=$REGISTRY/$CLUSTER_NAME-backend:$TAG" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=$REGISTRY/$CLUSTER_NAME-frontend:$TAG" >> "$GITHUB_ENV"
+
+      - name: Connect kubectl to EKS
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+      # Backend first, so the new frontend never calls an old API
+      - name: Deploy backend (auto-rollback on failure)
+        run: |
+          kubectl set image deployment/backend backend="$BACKEND_IMAGE" -n $NAMESPACE
+          if ! kubectl rollout status deployment/backend -n $NAMESPACE --timeout=180s; then
+            echo "::error::Backend rollout failed - rolling back"
+            kubectl rollout undo deployment/backend -n $NAMESPACE
+            exit 1
+          fi
+
+      - name: Deploy frontend (auto-rollback on failure)
+        run: |
+          kubectl set image deployment/frontend frontend="$FRONTEND_IMAGE" -n $NAMESPACE
+          if ! kubectl rollout status deployment/frontend -n $NAMESPACE --timeout=180s; then
+            echo "::error::Frontend rollout failed - rolling back"
+            kubectl rollout undo deployment/frontend -n $NAMESPACE
+            exit 1
+          fi

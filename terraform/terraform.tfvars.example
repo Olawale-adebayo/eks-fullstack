@@ -1,0 +1,7 @@
+# Copy this file to terraform.tfvars and edit the values
+region       = "us-east-1"
+cluster_name = "eks-notes"
+github_repo  = "your-github-username/eks-fullstack"
+
+# Set to false if "terraform apply" says the GitHub OIDC provider already exists
+create_github_oidc_provider = true

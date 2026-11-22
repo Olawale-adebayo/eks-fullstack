@@ -1,0 +1,9 @@
+# nginx 1.30.6 CVEs, fixed upstream in 1.30.7 (waiting for a new base image).
+# Not reachable here: nginx.conf uses no mail, http2, http3/quic, ssl or resolver.
+# Review again: 2026-12-01
+CVE-2026-113425
+CVE-2026-121810
+CVE-2026-123007
+CVE-2026-123633
+CVE-2026-118899
+CVE-2026-123634

@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------
+# BACKEND: Express API (private - only the frontend talks to it)
+# ---------------------------------------------------------------
+
+# Non-secret settings
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: notes
+data:
+  DB_HOST: postgres          # the Postgres Service name
+  DB_PORT: "5432"
+  REDIS_URL: redis://redis:6379
+  CACHE_TTL_SECONDS: "30"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: notes
+  labels:
+    app: backend
+spec:
+  type: ClusterIP # private
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: notes
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: backend
+          image: 669403677490.dkr.ecr.us-east-1.amazonaws.com/eks-notes-backend:v3 # replaced in Phase 4
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: backend-config
+          env:
+            # Secrets: taken from the same Secret Postgres uses
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef: { name: postgres-secret, key: POSTGRES_USER }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: postgres-secret, key: POSTGRES_PASSWORD }
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef: { name: postgres-secret, key: POSTGRES_DB }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /api/ready, port: http } # checks Postgres + Redis
+            periodSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true

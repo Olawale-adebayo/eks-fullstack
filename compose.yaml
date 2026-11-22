@@ -1,0 +1,48 @@
+# Runs all four services on your laptop with one command: docker compose up --build
+# Compose puts them on one Docker network, so they find each other by service name.
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:8080"          # open http://localhost:8080
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    ports:
+      - "3000:3000"          # exposed only so you can curl it directly while learning
+    environment:
+      DB_HOST: postgres      # the service name below = its address on the network
+      DB_PORT: "5432"
+      DB_USER: app
+      DB_PASSWORD: app
+      DB_NAME: app
+      REDIS_URL: redis://redis:6379
+      CACHE_TTL_SECONDS: "30"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # named volume: data survives container restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # pure cache, no disk
+
+volumes:
+  pgdata:

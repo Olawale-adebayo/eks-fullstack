@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+.terraform.lock.hcl
+*.bak
+
+# Added for safety
+node_modules/
+dist/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+tfplan
+*.pem
+*accessKeys*.csv
+.env
+*.bak

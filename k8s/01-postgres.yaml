@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------
+# DATABASE: Postgres
+# StatefulSet (not Deployment) because a database needs a stable
+# name and its OWN disk that follows it if the pod is replaced.
+# The password comes from the "postgres-secret" Secret, which you
+# create with kubectl (see README) so it never goes into Git.
+# ---------------------------------------------------------------
+
+# StorageClass: tells Kubernetes HOW to create disks (AWS EBS gp3)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+volumeBindingMode: WaitForFirstConsumer # create the disk in the same AZ as the pod
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+---
+# Private address "postgres:5432" for the backend (ClusterIP, never public)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: notes
+  labels:
+    app: postgres
+spec:
+  clusterIP: None # "headless": DNS points straight at the StatefulSet pod
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: notes
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-secret # POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+          env:
+            # Use a sub-folder, because a fresh EBS disk contains a "lost+found" folder
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  # Each pod gets its own PersistentVolumeClaim -> an EBS disk that survives restarts
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 5Gi

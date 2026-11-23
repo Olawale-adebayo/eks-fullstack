@@ -59,18 +59,37 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push both images (tagged with the commit SHA)
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          TAG: ${{ github.sha }}
+      - name: Build images
         run: |
+          REGISTRY="${{ steps.ecr.outputs.registry }}"
+          TAG="${{ github.sha }}"
           for svc in backend frontend; do
-            IMAGE="$REGISTRY/$CLUSTER_NAME-$svc:$TAG"
-            docker build --build-arg APP_VERSION="${TAG::7}" -t "$IMAGE" "$svc"
-            docker push "$IMAGE"
+            docker build --provenance=false --build-arg APP_VERSION="${TAG::7}" \
+              -t "$REGISTRY/$CLUSTER_NAME-$svc:$TAG" "$svc"
           done
           echo "BACKEND_IMAGE=$REGISTRY/$CLUSTER_NAME-backend:$TAG" >> "$GITHUB_ENV"
           echo "FRONTEND_IMAGE=$REGISTRY/$CLUSTER_NAME-frontend:$TAG" >> "$GITHUB_ENV"
+
+      - name: Scan backend image (block HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.BACKEND_IMAGE }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          trivyignores: .trivyignore
+
+      - name: Scan frontend image (block HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.FRONTEND_IMAGE }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          trivyignores: .trivyignore
+
+      - name: Push images (only reached if both scans pass)
+        run: |
+          docker push "$BACKEND_IMAGE"
+          docker push "$FRONTEND_IMAGE"
 
       - name: Connect kubectl to EKS
         run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"

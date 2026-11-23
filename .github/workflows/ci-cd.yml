@@ -71,7 +71,7 @@ jobs:
           echo "FRONTEND_IMAGE=$REGISTRY/$CLUSTER_NAME-frontend:$TAG" >> "$GITHUB_ENV"
 
       - name: Scan backend image (block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@NEW_VERSION
         with:
           image-ref: ${{ env.BACKEND_IMAGE }}
           severity: HIGH,CRITICAL
@@ -79,7 +79,7 @@ jobs:
           trivyignores: .trivyignore
 
       - name: Scan frontend image (block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@NEW_VERSION
         with:
           image-ref: ${{ env.FRONTEND_IMAGE }}
           severity: HIGH,CRITICAL

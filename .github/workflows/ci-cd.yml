@@ -70,21 +70,17 @@ jobs:
           echo "BACKEND_IMAGE=$REGISTRY/$CLUSTER_NAME-backend:$TAG" >> "$GITHUB_ENV"
           echo "FRONTEND_IMAGE=$REGISTRY/$CLUSTER_NAME-frontend:$TAG" >> "$GITHUB_ENV"
 
-      - name: Scan backend image (block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@NEW_VERSION
-        with:
-          image-ref: ${{ env.BACKEND_IMAGE }}
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          trivyignores: .trivyignore
-
-      - name: Scan frontend image (block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@NEW_VERSION
-        with:
-          image-ref: ${{ env.FRONTEND_IMAGE }}
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          trivyignores: .trivyignore
+      - name: Scan images with Trivy (block HIGH/CRITICAL)
+        run: |
+          for IMG in "$BACKEND_IMAGE" "$FRONTEND_IMAGE"; do
+            echo "Scanning $IMG"
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD/.trivyignore:/.trivyignore" \
+              aquasec/trivy:latest image \
+              --severity HIGH,CRITICAL --exit-code 1 \
+              --ignorefile /.trivyignore --no-progress "$IMG"
+          done
 
       - name: Push images (only reached if both scans pass)
         run: |

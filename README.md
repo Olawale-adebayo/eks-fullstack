@@ -1,3 +1,137 @@
+# EKS Full-Stack Notes App: DevSecOps on AWS
+
+A full-stack notes application (React + Node.js + PostgreSQL + Redis) deployed to **Amazon EKS** with **Terraform**, **security-scanned container images**, and a **GitHub Actions CI/CD pipeline** that authenticates to AWS with **OIDC (no stored keys)**.
+
+I built this project hands-on to learn Kubernetes and DevOps end to end, and I documented the problems I hit along the way, because that's where most of the learning happened.
+
+> **Status:** The infrastructure is torn down when not in use to avoid AWS costs. Everything can be recreated with `terraform apply` and the steps below.
+
+---
+
+## Tech stack
+
+| Area | Tools |
+|---|---|
+| Application | React (Vite) served by nginx, Node.js / Express API, PostgreSQL, Redis |
+| Containers | Docker (multi-stage builds, non-root users), Docker Compose for local testing |
+| Security | Trivy (images, dependencies, IaC, secrets), ECR scan on push, `.trivyignore` with documented exceptions |
+| Infrastructure as Code | Terraform: VPC, EKS, ECR (immutable tags), IAM, GitHub OIDC role |
+| Orchestration | Kubernetes on EKS: Deployments, StatefulSet, Services, ConfigMap, Secret, HPA |
+| CI/CD | GitHub Actions: test → build → scan → push → deploy, with automatic rollback |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[Users] --> LB[AWS load balancer<br/>Service type LoadBalancer]
+    subgraph VPC[AWS VPC - created by Terraform]
+      LB
+      subgraph EKS[EKS cluster: eks-notes / namespace: notes]
+        FE[Frontend pods x2<br/>nginx, port 8080]
+        BE[Backend pods x2<br/>Node.js, port 3000]
+        PG[(PostgreSQL<br/>StatefulSet + EBS gp3)]
+        RD[(Redis)]
+      end
+    end
+    LB --> FE
+    FE -- /api via Service name 'backend' --> BE
+    BE --> PG
+    BE --> RD
+    ECR[(Amazon ECR<br/>immutable tags)] -. images pulled .-> EKS
+```
+
+- **Only the frontend is public.** The backend, PostgreSQL and Redis are `ClusterIP` services, so they're unreachable from the internet.
+- Pods talk to each other **pod → Service → pod** using Service names (`backend:3000`, `postgres:5432`, `redis:6379`).
+- PostgreSQL runs as a **StatefulSet** with a persistent **EBS gp3** volume, so data survives pod restarts. (For production I'd move it to **Amazon RDS**; see lessons learned.)
+- Backend and frontend each run **2 replicas** for resilience and zero-downtime rolling updates, with **HPAs** for autoscaling.
+
+---
+
+## CI/CD pipeline
+
+```mermaid
+flowchart LR
+    P[git push to main] --> T1[test-backend<br/>npm test]
+    P --> T2[build-frontend<br/>npm run build]
+    T1 --> D
+    T2 --> D
+    subgraph D[deploy job]
+      direction TB
+      A[Log in to AWS via OIDC<br/>no stored keys] --> B[Build images<br/>tag = commit SHA]
+      B --> S[Trivy scan<br/>block HIGH/CRITICAL]
+      S --> PU[Push to ECR]
+      PU --> K[Deploy backend, then frontend<br/>auto-rollback on failure]
+    end
+```
+
+- **Pull requests** run tests only. **Deploys happen only on push to `main`**, enforced both in the workflow and in the IAM trust policy.
+- Images are tagged with the **Git commit SHA**, so every running image traces back to the exact code that built it.
+- **The Trivy scan is a gate:** if a HIGH or CRITICAL vulnerability appears, nothing is pushed or deployed.
+- Backend deploys **before** frontend, so a new frontend never calls an old API. A failed rollout triggers `kubectl rollout undo`.
+
+---
+
+## What I fixed along the way
+
+| # | Problem | Root cause | Fix |
+|---|---|---|---|
+| 1 | Frontend image had **68 HIGH/CRITICAL** vulnerabilities | Base image on an **end-of-life Alpine** release that no longer gets security updates | Moved to a current `nginx-unprivileged:stable-alpine` base plus `apk upgrade` (68 → 6). The remaining 6 nginx findings were reviewed as unreachable in this configuration and documented in `.trivyignore` with a review date |
+| 2 | Backend image had **6 HIGH** findings | All inside **npm itself**, shipped with the Node base image but unused at runtime | Removed npm, npx, yarn and corepack from the final image stage (6 → 0) |
+| 3 | Frontend build broke after `npm audit fix --force` | Vite was upgraded to a major version the React plugin didn't support yet (peer dependency conflict) | Upgraded `@vitejs/plugin-react` to match. Lesson: always rebuild and test right after a `--force` fix |
+| 4 | ECR scan said `ScanNotFoundException` / `UnsupportedImageError` | Modern Docker pushes a **bundle** (index + image + provenance attestation). ECR basic scanning can't scan the index or attestation | Build with `--provenance=false` so a single, scannable image is pushed |
+| 5 | Fixed images couldn't reuse their tag | ECR repositories use **immutable tags** | Pushed fixes as new versions (`v1` → `v2` → `v3`). The pipeline now uses commit SHAs |
+| 6 | Pods stuck in `CreateContainerConfigError` | The `postgres-secret` didn't exist. It's deliberately kept out of Git | Created it directly in the cluster with `kubectl create secret` and a generated password |
+| 7 | Pods refused to start: *"image has non-numeric user"* | Manifests set `runAsNonRoot: true`, but the images used **named** users (`node`, `nginx`), which Kubernetes can't verify | Switched to **numeric** users: `USER 1000` (backend), `USER 101` (frontend) |
+| 8 | Website timed out from the internet, though all targets were healthy | The load balancer was provisioned as **internal** (private IPs only) | Added `service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing` to the frontend Service |
+| 9 | `kubectl` failed with *"no such host"* after rebuilding | kubeconfig still pointed at the **deleted** cluster | Re-run `aws eks update-kubeconfig` after every cluster rebuild |
+| 10 | Pipeline failed: action version not found | A pinned third-party action tag didn't exist | Ran Trivy from its official Docker image instead, removing the action dependency |
+| 11 | Pipeline refused by AWS: *"Not authorized to perform sts:AssumeRoleWithWebIdentity"* | The repo uses GitHub's **immutable OIDC subject** (`owner@<id>/repo@<id>`), but the IAM trust policy expected the name-only format | Updated the trust policy's `sub` condition to the immutable format, which also protects against repo-name takeover |
+
+---
+
+## Security measures
+
+- **No long-lived AWS keys** in the pipeline or the cluster: GitHub Actions uses **OIDC**, scoped to this repository's `main` branch.
+- **Least privilege:** separate IAM roles per component, each with a trust policy limiting who can use it.
+- **Shift-left scanning:** Trivy locally, Trivy as a pipeline gate, and ECR scan on push as a second layer.
+- **Non-root containers** with numeric UIDs, enforced by `runAsNonRoot: true`.
+- **Minimal runtime images:** multi-stage builds. Package managers are removed from the final backend image.
+- **Secrets stay out of Git:** the database password lives only in a Kubernetes Secret, and `.gitignore` excludes keys, `.tfvars` and Terraform state.
+- **Only one public entry point:** everything except the frontend is `ClusterIP`.
+
+---
+
+## Lessons learned
+
+1. **`kubectl describe pod` explains most failures.** The Events section named the missing Secret and the non-numeric user in plain words.
+2. **Check what you're scanning.** Trivy's `Detected OS` line showed when I was accidentally scanning an old image.
+3. **Base images age.** Rebuild regularly with `--pull`, even when the code hasn't changed.
+4. **Ship only what runs.** Build tools left in an image (npm) are attack surface.
+5. **Healthy targets but no connection means a network problem, not an app problem.** Check DNS, then the load balancer scheme, then target health.
+6. **`kubectl diff` before `kubectl apply`**, just like `terraform plan` before `terraform apply`. It stopped me from deploying a broken file after I'd accidentally wiped it.
+7. **Git is a safety net.** A deleted file is one `git checkout` away from recovery.
+8. **Delete Kubernetes-created resources before `terraform destroy`.** Load balancers and EBS volumes created by Kubernetes aren't in Terraform's state and block VPC deletion.
+9. **In-cluster databases are fine for learning; RDS is safer for production** (automatic backups, Multi-AZ failover, managed patching).
+10. **OIDC trust policies must match the token exactly**, including GitHub's newer immutable subject format.
+
+---
+
+## Possible next steps
+
+- Move PostgreSQL to **Amazon RDS** and Redis to **ElastiCache**
+- Expose the app through an **Ingress + AWS Load Balancer Controller (ALB)** with HTTPS
+- Add **GitOps** (Argo CD) so the cluster always matches the manifests in Git
+- Enable the included **Prometheus/Grafana** monitoring and add load testing for the HPAs
+- Pin GitHub Actions to commit SHAs for stronger supply-chain security
+
+---
+
+*The original setup instructions follow below.*
+
+---
+
 # Build, Scale & Monitor a 4-Service App on Amazon EKS
 
 A hands-on project with a **Notes app** made of four services:
